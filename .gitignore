@@ -1,0 +1,6 @@
+# Never commit these — they can contain secrets or are machine-specific.
+.terraform/
+*.tfstate
+*.tfstate.*
+*.tfvars
+crash.log
