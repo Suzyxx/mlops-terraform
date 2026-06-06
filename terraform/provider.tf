@@ -5,8 +5,9 @@ terraform {
       version = ">=5.97"
     }
   }
+  backend "s3" {}
 }
 
 provider "aws" {
-  region = "eu-west-1"
+  region = var.aws_region
 }
