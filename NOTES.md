@@ -216,4 +216,59 @@ neutral, automated environment triggered by version control.
 assumption instead of long-lived keys (no stored secret at all); a matrix to run
 dev/tst/prd; `terraform plan` output posted as a PR comment.
 
-<!-- Lesson 2 step-by-step (bootstrap → restructure → migrate → CI/CD) added below as we do them. -->
+### Why a feature branch + pull request (not committing to main)
+
+Our workflow triggers on `pull_request` into `main` — i.e. "run when someone proposes
+merging *into* main." A PR is by definition a request to merge **one branch into
+another**, so we need a separate branch (`lesson-2-cicd`) to hold the changes. If we
+committed straight to `main`, there'd be no PR and **the pipeline would never trigger**.
+
+But it's not just a technicality — branches are what make *review* possible, which is
+the whole maturity jump of lesson 2:
+
+```
+main  ───●───────────────────────●──────►   (source of truth, always-deployable)
+          \                      /
+           \                    / merge (after approval)
+lesson-2-cicd ●──●──●  ← changes live here
+                   │
+                   └─ open PR → CI runs plan → human approves → apply
+```
+
+- **`main`** = trusted state of the infra; you don't want half-finished edits there.
+- **feature branch** = safe scratch space; changes don't affect main until reviewed.
+- **pull request** = the review checkpoint: shows the diff, runs `plan` so you can SEE
+  what would change in AWS, and holds the approval gate BEFORE anything is applied.
+
+This is the standard **GitHub Flow / trunk-based** workflow: main stays clean, work
+happens on short-lived branches, changes merge back only after passing CI + review.
+
+> Video line: *"We work on a branch and open a pull request because that's what lets
+> the pipeline review and approve infra changes before they touch AWS — instead of
+> applying blindly from a laptop."*
+
+🌟 Extra-credit: enable **branch protection** on main (require the CI check to pass +
+an approval before merge) so the gate can't be bypassed.
+
+### Deprecation warnings we hit (theme: dependencies evolve, IaC/CI needs maintenance)
+
+Both are **warnings, not errors** — everything ran green. Worth a mention in the video
+because they show a real MLOps truth: the tools and dependencies underneath you keep
+moving, so infra/CI code has to be maintained over time, not written once and forgotten.
+
+1. **Terraform AWS provider (v6.49):** `acceleration_status is deprecated...` Several
+   settings that used to live directly on `aws_s3_bucket` (acceleration, versioning,
+   encryption) are being split into their own resources. We see it because our module's
+   `output "data"` returns the *whole* bucket object. 🌟 Fix = output only specific
+   fields (e.g. `value = aws_s3_bucket.s3.arn`) instead of the whole object.
+
+2. **GitHub Actions Node.js 20 deprecation:** `checkout@v4`,
+   `configure-aws-credentials@v4`, `setup-terraform@v3` run on Node 20, which GitHub is
+   retiring (forced to Node 24 on 2026-06-16; Node 20 removed 2026-09-16). 🌟 Fix = bump
+   each action to a newer version built for Node 24 when the maintainers release one
+   (one line per action, no logic change).
+
+**Takeaway:** pinning versions (`@v4`, provider `>=5.97`) keeps builds reproducible
+*today*; periodically updating them keeps you supported. A mature team watches both.
+
+<!-- Lesson 3 (ML code + DVC + Docker) notes go below as we do them. -->
