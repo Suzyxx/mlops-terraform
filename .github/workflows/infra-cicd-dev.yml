@@ -1,0 +1,60 @@
+name: Infrastructure CI/CD (dev)
+
+# When does this run?
+on:
+  # On a pull request into main — but only if Terraform files actually changed.
+  pull_request:
+    branches: ["main"]
+    paths:
+      - "terraform/**"
+  # Also allow running it by hand from the Actions tab.
+  workflow_dispatch:
+
+jobs:
+  terraform-plan-apply:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: terraform # all steps run inside the terraform/ folder
+    permissions:
+      issues: write # the approval step opens an issue to wait on
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: eu-west-1
+
+      - name: Terraform Format
+        run: terraform fmt -check
+        continue-on-error: true # a formatting nit shouldn't block the pipeline
+
+      - name: Terraform Init
+        run: terraform init --backend-config='backends/dev.conf'
+
+      - name: Terraform Validate
+        run: terraform validate -no-color
+
+      - name: Terraform Plan
+        run: terraform plan -no-color --var-file='environments/dev.tfvars' -out=plan.tfout
+
+      - name: Approval
+        uses: trstringer/manual-approval@v1
+        timeout-minutes: 60
+        with:
+          secret: ${{ github.token }}
+          approvers: Suzyxx
+          issue-title: "Deploy Terraform plan to dev"
+          issue-body: "Review the Terraform plan above, then approve to apply."
+          exclude-workflow-initiator-as-approver: false
+
+      - name: Terraform Apply
+        run: terraform apply -auto-approve plan.tfout

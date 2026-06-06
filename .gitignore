@@ -2,5 +2,10 @@
 .terraform/
 *.tfstate
 *.tfstate.*
-*.tfvars
 crash.log
+
+# .tfvars can hold secrets, so ignore them by default...
+*.tfvars
+# ...but our per-environment configs are NON-secret (region, bucket keys) and
+# MUST be committed so the CI/CD pipeline can read them.
+!terraform/environments/*.tfvars
