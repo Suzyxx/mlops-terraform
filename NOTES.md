@@ -271,4 +271,150 @@ moving, so infra/CI code has to be maintained over time, not written once and fo
 **Takeaway:** pinning versions (`@v4`, provider `>=5.97`) keeps builds reproducible
 *today*; periodically updating them keeps you supported. A mature team watches both.
 
-<!-- Lesson 3 (ML code + DVC + Docker) notes go below as we do them. -->
+## Lesson 3 — Data Versioning & Model Containerization (DVC + Docker)
+
+### Why lesson 3 exists (the big picture)
+
+Lessons 1–2 made the **infrastructure** reproducible. Lesson 3 does the same for the
+**ML work itself**: the data, the model, and the runtime environment. It tackles four
+real ML problems:
+
+| Problem | What breaks without a fix | Lesson 3's answer |
+|---------|---------------------------|-------------------|
+| **Messy code** | One giant script nobody can debug or reproduce | A modular pipeline (`ingest→clean→train→predict`) driven by `config.yml` |
+| **Data drift** | Data changes over time; "which data made this model?" is unanswerable | **DVC** versions the data alongside the code |
+| **Reproducibility** | "Works on my machine" — different Python/deps elsewhere | A **virtual environment** + pinned `requirements.txt`, then **Docker** |
+| **Deployment** | A `.pkl` file can't be called by anyone | **FastAPI** serves it as an API; **Docker** packages it to deploy |
+
+### The ML pipeline (code structured for reproducibility)
+
+**What we did:** split the ML work into single-responsibility stages, all parameterized
+by one config file:
+- `pipelines/ingest.py` — load `train.csv`/`test.csv` (paths from config)
+- `pipelines/clean.py` — drop unused columns, impute missing values, strip the `£`/commas
+  from `AnnualPremium`, remove outliers (IQR). *Real data is messy.*
+- `pipelines/train.py` — preprocess (scale numerics, one-hot encode categoricals),
+  apply **SMOTE**, fit the model, save `models/model.pkl`
+- `pipelines/predict.py` — load the model, evaluate (accuracy, ROC-AUC, report)
+- `main.py` — orchestrates the four stages; `config.yml` holds every parameter.
+
+**Why config-driven?** To swap a DecisionTree for a RandomForest you edit **config, not
+code** — so the experiment is described by a versioned file, not by remembering what you
+typed. Same declarative philosophy as Terraform, applied to ML.
+
+**Result:** `DecisionTreeClassifier` → accuracy **0.834**, ROC-AUC **0.715**.
+🌟 **Why ROC-AUC, not accuracy?** The data is imbalanced (~85.6k "no" vs ~11.8k "yes").
+A model that always says "no" scores ~88% accuracy while being useless. **SMOTE**
+(Synthetic Minority Over-sampling) generates synthetic "yes" examples so the model
+actually learns the rare class — recall on the minority went to ~0.56 instead of ~0.
+
+> Video line: *"Each stage has one job and every parameter lives in config, so the whole
+> experiment is described by versioned files — reproducible, not improvised."*
+
+### DVC — version control for data ("git for data")
+
+**The problem:** git is terrible at large/binary files. Our CSVs are ~6 MB *each* and
+`model.pkl` is ~6 MB — committing them bloats the repo and binary diffs are meaningless.
+
+**How DVC solves it (the core mechanic):**
+- We `dvc add data` → DVC computes a **content hash**, moves the real bytes to a cache,
+  and writes a tiny text **pointer file `data.dvc`** (just the hash + size).
+- **Git tracks the pointer; S3 holds the bytes.** `data/` goes in `.gitignore`; `dvc push`
+  uploads the actual data to the S3 remote. Git stays small and fast.
+- The remote is **the Lesson-2 `datastore-dev` bucket** — the infrastructure we built
+  earlier is now the storage backend for our ML data. 🎬 nice full-circle moment.
+
+**Content-hashing gives us three things** (visible in S3 as `data/files/md5/xx/<hash>`):
+integrity (a changed byte changes the hash), deduplication (identical files stored once),
+and a manifest (`.dir`) mapping hashes back to filenames.
+
+**Versioning demo (the payoff):**
+| Action | Command | Result |
+|--------|---------|--------|
+| Tag initial data | `dvc add data` → `git tag v1` → `dvc push` | `v1` = 100,001 rows |
+| Simulate drift | delete 1 row → `dvc add data` → `git tag v2` → `dvc push` | `v2` = 100,000 rows |
+| Roll back | `git checkout v1 -- data.dvc` → `dvc checkout` | original data restored! |
+
+On the `v2` push, only **2 files** uploaded (changed `train.csv` + manifest) — `test.csv`
+was deduplicated and skipped. And rollback moved only a **pointer** in git; DVC swapped
+the bytes. `dvc checkout` restores from local cache; `dvc pull` fetches from S3 (what a
+fresh `git clone` on another machine would use).
+
+> Video line: *"Git tracks a small hash pointer; the data bytes live in S3. So git stays
+> fast, and any tagged data version is reproducible with git + dvc."*
+
+🌟 **Extra-credit:** the same idea extends to **model versioning** — a model is truly
+reproducible when code (git) + data (DVC tag) + config are pinned together; you could
+also `dvc add models/` to version the artifact itself.
+
+### Dependency drift we hit (theme: reproducibility is hard — and continues from L2)
+
+Running the teacher's code "today" (a newer package landscape) broke twice — *not* in the
+teacher's recording. Both fixed by **pinning** in `requirements.txt`:
+1. **`pathspec`** — pip pulled a 1.x version that removed `_DIR_MARK`, crashing
+   `dvc init`. Pinned `pathspec==0.12.1`.
+2. **`boto3`/`botocore`** — `dvc[s3]` needs `boto3`, but newer `aiobotocore` stopped
+   pulling it in *and* requires `botocore<1.43.1`. Pinned `boto3==1.43.0` + `botocore==1.43.0`.
+
+🌟 This is the same lesson as L2's deprecation warnings: **dependencies evolve; pinning
+keeps builds reproducible today, and you maintain those pins over time.** Living it
+firsthand is good extra-credit material — the README literally names "reproducibility" as
+a core challenge.
+
+### Docker — packaging the model so it runs anywhere (and can be deployed)
+
+**The problem Docker solves: "works on my machine."** The model currently runs only
+inside *my* `.venv`, on *my* Mac, with *my* Python 3.10 and exact packages. A cloud
+server won't have that. **Docker bundles the OS + Python + all dependencies + the code +
+the model into one portable image** that runs *identically anywhere*. It's the virtual-env
+idea taken all the way down to the operating system.
+
+**The two files:**
+- **`app.py` (FastAPI)** — wraps the `.pkl` in a web API. A `BaseModel` schema declares
+  the 7 input features and their types, so pydantic **validates** every request (a
+  production API can't trust its callers). `GET /` is a **health check** (cloud platforms
+  ping it to confirm the container is alive — matters in Lesson 4); `POST /predict` takes
+  JSON → returns `{"predicted_class": 0/1}`. The model is loaded **once at startup**.
+- **`Dockerfile`** — the build recipe: `FROM python:3.13-slim` → `COPY` in app/model/
+  requirements → `pip install` → `CMD` launches uvicorn on port 80.
+
+**How we ran it:**
+```
+docker build -t mlops-course-03-image .
+docker run -d --name mlops-course-03-container -p 80:80 mlops-course-03-image
+curl http://127.0.0.1/            → {"health_check":"OK"}
+curl -X POST .../predict -d '{...}' → {"predicted_class":1}
+```
+`-p 80:80` bridges the Mac's port 80 into the container's port 80. Interactive Swagger UI
+at **http://127.0.0.1/docs**.
+
+**Why Docker is the prerequisite for Lesson 4:** you can't deploy a loose `.pkl` + scripts
+to the cloud — AWS App Runner runs **containers**. Docker turns "I trained a model" into
+"I have a deployable artifact." That's the bridge.
+
+> Video line: *"Docker packages the whole environment into a portable image that runs the
+> same everywhere — which is exactly what AWS needs to deploy it in Lesson 4."*
+
+🌟 **Extra-credit — `.dockerignore` + image hygiene:** I added a `.dockerignore`
+(beyond the teacher's repo) to keep `.venv/`, `data/`, and the DVC cache out of the build
+context — that's why the context was only ~6 MB. A further improvement: the serving image
+installs the *full* `requirements.txt` (mlflow, jupyter, dvc) which serving doesn't need;
+a production fix is a slim `requirements-serve.txt` (fastapi, uvicorn, scikit-learn,
+imbalanced-learn, pandas, joblib) → smaller, faster, more secure image.
+
+### The thread tying all three lessons together (the video's backbone)
+
+The MLOps move is identical every time: **declare it in a file → version it in git →
+reproduce it anywhere.** Only the *thing* being managed changes:
+
+| Layer | "Code" that declares it | Versioned in |
+|-------|------------------------|--------------|
+| **Infrastructure** | Terraform `.tf` files | git |
+| **Data** | DVC `data.dvc` pointers + tags | git (pointer) + S3 (bytes) |
+| **Runtime environment** | `Dockerfile` + `requirements.txt` | git |
+
+> Closing video line: *"Whether it's infrastructure, data, or the runtime environment,
+> the MLOps move is the same — describe it as code, version it, and reproduce it on
+> demand. That's what makes the whole project repeatable instead of 'it worked once on my
+> laptop.'"*
+
