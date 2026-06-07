@@ -369,6 +369,39 @@ server won't have that. **Docker bundles the OS + Python + all dependencies + th
 the model into one portable image** that runs *identically anywhere*. It's the virtual-env
 idea taken all the way down to the operating system.
 
+#### Key terms clarified (these confused me at first)
+
+**What is a Docker "image"?** Nothing to do with pictures/computer vision — it's the
+*other* meaning of "image" in computing, like a **disk image / ISO**: a complete frozen
+snapshot of a whole environment. A Docker image is a **read-only blueprint** containing
+the base OS + Python + dependencies + `app.py` + `model.pkl`, all sealed into one package.
+`docker build` *generated* this; it doesn't run by itself.
+
+**Image vs. Container:**
+| Term | What it is | Analogy |
+|------|-----------|---------|
+| **Image** | The frozen blueprint/template (doesn't run) | A recipe / a class definition / an installer |
+| **Container** | A *running instance* started from an image | The cooked dish / an object made from the class |
+
+```
+Dockerfile  →  docker build  →  IMAGE          →  docker run  →  CONTAINER
+(the recipe)   (bake it)        (frozen template)  (start it)      (running app)
+```
+One image → can spin up many containers (build once, run identically, as many times as you want).
+
+**What is "containerization"?** The *practice* of packaging an app into a container so it
+runs in its own isolated, self-contained box. The word comes from **shipping containers**:
+a standardized box any ship/truck/crane moves identically without caring what's inside —
+software containers do the same for apps (self-contained, isolated, portable, consistent).
+**vs. a virtual machine:** a VM boots a whole guest OS (heavy, GBs, slow); a container
+shares the host's OS kernel and only packages the app + its deps (lightweight, starts in
+seconds) — which is why containers are the standard unit for deploying apps/models.
+
+> Video line: *"A Docker image isn't a picture — it's a frozen snapshot of the whole
+> environment, like a disk image. Containerization means packaging the model into an
+> isolated, portable box (like a shipping container) that runs the same on my laptop or in
+> the cloud — and unlike a VM, it's lightweight because it shares the host OS."*
+
 **The two files:**
 - **`app.py` (FastAPI)** — wraps the `.pkl` in a web API. A `BaseModel` schema declares
   the 7 input features and their types, so pydantic **validates** every request (a
