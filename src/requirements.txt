@@ -9,3 +9,5 @@ joblib==1.5.0
 fastapi==0.115.12
 pytest==8.3.5
 pathspec==0.12.1  # pinned: newer pathspec (1.x) breaks dvc 3.59.2 (_DIR_MARK import error)
+boto3==1.43.0     # required by dvc[s3]; pinned with botocore so aiobotocore (botocore<1.43.1) stays happy
+botocore==1.43.0
