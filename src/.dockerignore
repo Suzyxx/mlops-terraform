@@ -1,0 +1,10 @@
+# Keep the Docker build context small & the image clean.
+# The build context is the src/ folder; don't ship these into it:
+.venv/
+venv/
+data/
+.dvc/
+__pycache__/
+*.pyc
+.pytest_cache/
+.ipynb_checkpoints/
