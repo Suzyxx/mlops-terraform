@@ -481,6 +481,23 @@ Result: `001277371466.dkr.ecr.eu-west-1.amazonaws.com/mlops-course-shan-reposito
 > temporary token, tag the image with the registry's address, and push — now the image
 > lives in the cloud, not just on my laptop."*
 
+🌟 **Scan-on-push: the security payoff (and a real gotcha I hit).** ECR's
+`scan_on_push` auto-checks each image for known CVEs. My *first* scan said **"Scan not
+found"** — because modern Docker (buildx) pushes images as an **OCI image index** with
+provenance/SBOM attestations, a format ECR **basic scanning can't read**
+(`UnsupportedImageTypeException`). **Fix:** rebuild with
+`docker build --provenance=false --sbom=false` to produce a plain single-platform
+manifest, then re-push. The scan then ran and found **3 HIGH + 2 MEDIUM** vulnerabilities
+— **all in the `perl` package** baked into the `python:3.13-slim` base image, which my app
+doesn't even use. Two lessons in one: (1) the **registry adds security** by flagging CVEs
+automatically, and (2) concrete proof for the **slim-image** point — a smaller base ships
+fewer packages = fewer CVEs = less attack surface. (Same "tooling evolves underneath you"
+theme as the dependency-drift fixes.)
+
+> Video line: *"The registry scanned my image automatically and found 5 CVEs — all in
+> `perl`, which my model never uses. It came free with the base image. That's a live
+> argument for a slimmer image: fewer packages, fewer vulnerabilities."*
+
 🌟 **Why modules? (a question raised in class)** Lesson 4 is the proof. Adding ECR *and*
 App Runner each took the **identical pattern** as the S3 bucket: a small reusable
 `module/` + one entry in `dev.tfvars` + a `for_each` loop. A module is **to
