@@ -435,7 +435,124 @@ installs the *full* `requirements.txt` (mlflow, jupyter, dvc) which serving does
 a production fix is a slim `requirements-serve.txt` (fastapi, uvicorn, scikit-learn,
 imbalanced-learn, pandas, joblib) → smaller, faster, more secure image.
 
-### The thread tying all three lessons together (the video's backbone)
+## Lesson 4 — Deploying the Model to the Cloud (ECR + App Runner)
+
+### Why lesson 4 exists (the big picture)
+
+Lesson 3 produced a **deployable artifact** (the Docker image). Lesson 4 gets it
+**running in the cloud, reachable by a URL** — the last mile. Two new AWS pieces, with
+the image push in between:
+
+```
+model image ──push──►  ECR (registry)  ──pull──►  App Runner (runs it)
+                       a private "shelf"          serverless host that
+                       for container images       gives a public HTTPS URL
+```
+
+| Problem | What breaks without a fix | Lesson 4's answer |
+|---------|---------------------------|-------------------|
+| **Image stuck on my laptop** | The cloud can't reach an image that only exists locally | **ECR** — a private cloud registry to store the image |
+| **Running / scaling / HTTPS by hand** | Managing servers, TLS, restarts myself is fragile | **App Runner** — serverless: hand it an image + a port, it runs it |
+| **"Is this image safe?"** | Unknown vulnerabilities ship to prod | ECR **scan-on-push** checks each image for known CVEs |
+| **Runtime reading a *private* image** | App Runner can't pull without permission | An **IAM role** App Runner assumes, with ECR-read access |
+
+> Video line: *"Lessons 1–3 built and packaged the model; Lesson 4 is the last mile —
+> store the image in a cloud registry and run it on managed infrastructure, all declared
+> as Terraform code."*
+
+### ECR — a cloud registry for the image
+
+**Why:** App Runner (or any cloud runtime) can't pull an image sitting on my Mac. ECR is
+a **private Docker registry** — the cloud "shelf" the image must live on first. We
+declared it the *mature* way (same module pattern as the S3 bucket), with `scan_on_push`
+on and `MUTABLE` tags (so re-pushing `:latest` overwrites while iterating).
+
+**The push flow (3 commands, each solving one thing):**
+| Step | Command (abridged) | Why |
+|------|--------------------|-----|
+| **Log in** | `aws ecr get-login-password … \| docker login …` | ECR is *private*; this fetches a temporary 12-hour token so Docker may push |
+| **Tag** | `docker tag mlops-course-03-image:latest <ecr-uri>:latest` | Docker decides *where* to push from the image's name; the tag is an **alias** pointing at the ECR repo (no copy) |
+| **Push** | `docker push <ecr-uri>:latest` | Uploads the image layers to ECR; the scan then runs automatically |
+
+Result: `001277371466.dkr.ecr.eu-west-1.amazonaws.com/mlops-course-shan-repository-dev:latest`
+— the model image, now a **versioned, scanned artifact in the cloud.**
+
+> Video line: *"ECR is a private shelf for container images. I log Docker in with a
+> temporary token, tag the image with the registry's address, and push — now the image
+> lives in the cloud, not just on my laptop."*
+
+🌟 **Why modules? (a question raised in class)** Lesson 4 is the proof. Adding ECR *and*
+App Runner each took the **identical pattern** as the S3 bucket: a small reusable
+`module/` + one entry in `dev.tfvars` + a `for_each` loop. A module is **to
+infrastructure what a function is to code** — write "how to make one X" once, call it
+anywhere, fix it in one place. Without modules you copy-paste a full resource block per
+repo/service/environment, and any rule change means editing every copy (that's how infra
+rots). With modules, **infra scales by data, not by duplicated code.**
+
+### App Runner — the serverless runtime (the deploy target)
+
+**What it is:** a managed service that **pulls the image from ECR, runs the container,
+gives a public HTTPS URL, and handles scaling + TLS** for me. Versus raw EC2: no servers
+to patch or manage — I just declare "run this image on port 80."
+
+**Two things worth explaining on camera:**
+- **The IAM role (why it exists):** App Runner is a *separate AWS service*, so to read my
+  **private** ECR image it must **assume a role** that's allowed to. The role trusts the
+  `build.apprunner.amazonaws.com` principal and attaches AWS's managed
+  `AWSAppRunnerServicePolicyForECRAccess` policy. This is least-privilege in action:
+  permission is granted explicitly, not assumed.
+- **`auto_deployments_enabled = true`:** when a *new* image is pushed to that ECR tag,
+  App Runner redeploys itself automatically — that's **continuous deployment for the
+  model**, the CD that closes the loop.
+
+**Full-circle tie:** App Runner health-checks the container by hitting `GET /` on port 80
+— which is *exactly* why `app.py` has a `{"health_check": "OK"}` route and the
+`Dockerfile` binds `--host 0.0.0.0 --port 80`. Lesson 3 was quietly building for this.
+
+### The limitation I hit — App Runner needs an account subscription (a real MLOps lesson)
+
+`terraform apply` created the IAM role, then failed on the service:
+```
+Error: SubscriptionRequiredException: The AWS Access Key Id needs a subscription for the service
+```
+This is **not a code bug** (the plan was perfect) — it's an **account-level entitlement**:
+my AWS account isn't signed up for App Runner (common on brand-new accounts whose billing
+isn't fully activated yet).
+
+🔑 **Region vs. account — two different causes, same symptom.** A classmate hit App Runner
+failing in **`eu-north-1` (Stockholm)** and fixed it by switching to `eu-west-1` — because
+App Runner **isn't offered in eu-north-1 at all** (a *region availability* problem). But
+**I'm already in `eu-west-1`** and still got blocked, so mine is an *account subscription*
+problem, which changing region cannot fix. Reading the error precisely is the skill.
+
+(Also: this has nothing to do with being logged into the AWS console. Terraform
+authenticates with the stored **access key** of the `terraform-cli` IAM user, not my
+browser session.)
+
+**What I did about it (the engineer's move):**
+1. **Kept all the App Runner Terraform** (`modules/apprunner-service/` +
+   `apprunner_services.tf` + the commented config in `dev.tfvars`) — it's a finished
+   "this is how you'd deploy it" artifact, ready to flip on in 2 minutes if the account
+   activates before the deadline.
+2. **Disabled the instance** (empty list via the variable default) and re-applied to
+   **clean up the orphaned IAM role**, so state stays tidy.
+3. The image **is** in ECR (verified with `aws ecr describe-images`) and **is** runnable
+   (proven by the Lesson-3 local `docker run`). So deployment is proven all the way to the
+   final "press play" — which is an account permission, not an engineering gap.
+
+> Video line: *"My deliverable is the full deploy-as-code pipeline: model → image →
+> versioned, scanned artifact in ECR, with App Runner defined in Terraform. App Runner
+> itself needs an account subscription my new account doesn't have yet — and being able to
+> read that error, tell it apart from my classmate's region issue, and fall back cleanly
+> is itself the MLOps lesson."*
+
+🌟 **Extra-credit directions:** (a) an **`app-cicd` GitHub Actions workflow** that
+auto-builds and pushes a fresh image to ECR on every code change (with `auto_deployments`,
+that's hands-free CD); (b) **ECS Fargate** as an alternative runtime that doesn't need the
+App Runner subscription; (c) the **slim `requirements-serve.txt`** to shrink the 3 GB
+serving image (mlflow/jupyter/dvc aren't needed to *serve*).
+
+### The thread tying all four lessons together (the video's backbone)
 
 The MLOps move is identical every time: **declare it in a file → version it in git →
 reproduce it anywhere.** Only the *thing* being managed changes:
@@ -445,9 +562,10 @@ reproduce it anywhere.** Only the *thing* being managed changes:
 | **Infrastructure** | Terraform `.tf` files | git |
 | **Data** | DVC `data.dvc` pointers + tags | git (pointer) + S3 (bytes) |
 | **Runtime environment** | `Dockerfile` + `requirements.txt` | git |
+| **Deployment** | Terraform `ecr_repositories.tf` + `apprunner_services.tf` | git (config) + ECR (image, by tag) |
 
-> Closing video line: *"Whether it's infrastructure, data, or the runtime environment,
-> the MLOps move is the same — describe it as code, version it, and reproduce it on
-> demand. That's what makes the whole project repeatable instead of 'it worked once on my
-> laptop.'"*
+> Closing video line: *"Whether it's infrastructure, data, the runtime environment, or the
+> deployment itself, the MLOps move is the same — describe it as code, version it, and
+> reproduce it on demand. That's what makes the whole project repeatable instead of 'it
+> worked once on my laptop.'"*
 
