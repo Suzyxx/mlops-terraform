@@ -1,0 +1,59 @@
+name: Application CI/CD (dev)
+
+# When does this run?
+on:
+  # On a pull request into main — but only if app/model code actually changed.
+  pull_request:
+    branches: ["main"]
+    paths:
+      - "src/**"
+  # Also allow running it by hand from the Actions tab.
+  workflow_dispatch:
+
+jobs:
+  retrain-build-push:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: src # all steps run inside the src/ folder
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Install dependencies
+        run: pip install --no-cache-dir -r requirements.txt
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: eu-west-1
+
+      - name: Pull data with DVC
+        # Fetch the versioned dataset from the S3 remote (the Lesson-2 datastore
+        # bucket) — so CI trains on exactly the data version git points at.
+        run: dvc pull
+
+      - name: Retrain the model
+        # Re-runs ingest -> clean -> train -> predict and writes models/model.pkl,
+        # so the image always ships a model rebuilt from the current code + data.
+        run: |
+          mkdir -p models
+          python main.py
+
+      - name: Log in to Amazon ECR
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Build and push image to ECR
+        # --provenance=false keeps it a plain single-platform manifest so ECR's
+        # scan-on-push can read it (a buildx OCI image index can't be scanned).
+        run: |
+          docker build --provenance=false --sbom=false -t ${{ secrets.ECR_REPOSITORY }}:latest .
+          docker push ${{ secrets.ECR_REPOSITORY }}:latest

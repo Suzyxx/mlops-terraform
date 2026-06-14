@@ -460,6 +460,46 @@ model image ──push──►  ECR (registry)  ──pull──►  App Runner
 > store the image in a cloud registry and run it on managed infrastructure, all declared
 > as Terraform code."*
 
+### MLflow — experiment tracking & model versioning (the assignment's "model versioning" topic)
+
+**Why:** once you try different models/params, "*which* run produced the best model, and
+with *what* settings?" becomes impossible to answer from memory. **MLflow records every
+training run** — its parameters, metrics, and the model artifact — and **registers
+versioned models** in a central registry. That's the **model-versioning** layer the
+assignment explicitly asks me to explain.
+
+**What we did:** added `mlflow_main()` to `main.py` — the same
+ingest→clean→train→evaluate pipeline, wrapped in an MLflow run that **logs params +
+metrics**, **logs the model** (with an input/output **signature**), and calls
+`register_model` to create a new version in the **Model Registry**. Backed by a local
+sqlite store (`sqlite:///mlflow.db`, so the registry works), viewed with
+`mlflow ui --backend-store-uri sqlite:///mlflow.db` at http://127.0.0.1:5000.
+
+**The demo that proves the point (experiment comparison):** I swapped the model in
+`config.yml` (config, not code) and re-ran — MLflow tracked both as separate runs and
+registered a new version:
+
+| Run | Model | accuracy | roc_auc |
+|-----|-------|----------|---------|
+| **v1** | DecisionTreeClassifier | **0.834** | 0.715 |
+| **v2** | RandomForestClassifier (max_depth=10) | 0.629 | **0.725** |
+
+🌟 **The killer insight:** RandomForest has *lower accuracy* but *higher roc_auc*. On
+imbalanced data **accuracy is misleading** (same lesson as L3's SMOTE point) — roc_auc is
+the metric to compare on, and by *that* measure RandomForest is the better model. **This
+is exactly why experiment tracking matters:** without MLflow logging both runs side by
+side, you'd "remember" DecisionTree's 83% accuracy and wrongly pick it; with it, you
+compare on the right metric and choose deliberately. (I kept DecisionTree as the shipped
+model for consistency with L3 + the image already in ECR, but the registry holds both
+versions.) Also note the v1 numbers **exactly match Lesson 3** — same code + data version
+→ same model = reproducibility, demonstrated.
+
+> Video line: *"I changed one line of config from DecisionTree to RandomForest, and MLflow
+> tracked both runs and registered a new model version. RandomForest had lower accuracy but
+> higher ROC-AUC — and on imbalanced data ROC-AUC is what counts. That's the value of
+> experiment tracking: compare on the right metric and pick the best model reproducibly,
+> instead of guessing from memory."*
+
 ### ECR — a cloud registry for the image
 
 **Why:** App Runner (or any cloud runtime) can't pull an image sitting on my Mac. ECR is
@@ -563,11 +603,35 @@ browser session.)
 > read that error, tell it apart from my classmate's region issue, and fall back cleanly
 > is itself the MLOps lesson."*
 
-🌟 **Extra-credit directions:** (a) an **`app-cicd` GitHub Actions workflow** that
-auto-builds and pushes a fresh image to ECR on every code change (with `auto_deployments`,
-that's hands-free CD); (b) **ECS Fargate** as an alternative runtime that doesn't need the
-App Runner subscription; (c) the **slim `requirements-serve.txt`** to shrink the 3 GB
-serving image (mlflow/jupyter/dvc aren't needed to *serve*).
+### App CI/CD — automating retrain → build → push (`app-cicd-dev.yml`)
+
+**Why:** today I built + pushed the image to ECR **by hand** (login → build → tag → push).
+That's manual, error-prone, and only works from my laptop. The app CI/CD workflow
+**automates it**: on a pull request touching `src/**` (or a manual run), GitHub Actions
+retrains the model and ships a fresh image to ECR — no human steps.
+
+**What it does, step by step:** checkout → set up Python → install deps → configure AWS
+creds (repo secrets) → **`dvc pull`** (fetch the *versioned* dataset from the S3 remote, so
+CI trains on exactly the data git points at) → **retrain** (`python main.py` → fresh
+`model.pkl`) → **ECR login** → **build + push** the image. With App Runner's
+`auto_deployments_enabled`, a new image would then auto-redeploy — closing the loop *code
+change → live model* (the one link blocked by the account).
+
+**Mirror of Lesson 2:** same GitHub Actions + repo-secrets pattern as the *infra* pipeline,
+now for the **app/model** instead of infrastructure. The infra pipeline has a **manual
+approval gate** (applying infra is sensitive); the app pipeline doesn't (pushing an image
+is lower-risk). New secret added: `ECR_REPOSITORY` (the repo URI — kept out of the public
+workflow file). 🌟 I also added `--provenance=false` to the CI build (from the scan-on-push
+gotcha) so images pushed by CI stay scannable.
+
+> Video line: *"The app CI/CD workflow turns my manual `docker push` into a hands-free
+> pipeline: change the code, and GitHub Actions pulls the versioned data, retrains, and
+> pushes a fresh image to ECR automatically — the same automation idea as my Lesson-2 infra
+> pipeline, now for the model."*
+
+🌟 **Extra-credit directions:** (a) **ECS Fargate** as an alternative runtime that doesn't
+need the App Runner subscription; (b) the **slim `requirements-serve.txt`** to shrink the
+3 GB serving image (mlflow/jupyter/dvc aren't needed to *serve*).
 
 ### The thread tying all four lessons together (the video's backbone)
 

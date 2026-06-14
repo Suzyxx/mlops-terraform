@@ -9,3 +9,7 @@ models/
 
 # Note: data/ will be managed by DVC (it adds its own .gitignore entry on `dvc add`)
 /data
+
+# MLflow local tracking (experiments + registry live in sqlite/artifacts, not git)
+mlflow.db
+mlruns/
